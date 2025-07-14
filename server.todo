@@ -1,0 +1,19 @@
+- [ ] Create Register Endpoint @ignore
+- [ ] Create Login Endpoint @ignore
+// USER PROFILE
+- [ ] Create Delete User Endpoint @done
+
+//PORTFOLIO
+- [ ] Create Get Portfolio Endpoint @done
+    - [ ] Return Cash, Holdings[], and total Value @done
+- [ ] Create Portfolio History
+- [ ] Create Reset Portfolio Endpoint @done
+
+
+//TRADING
+- [ ] Create Post Buy Trade Endpoint @done
+- [ ] Create Post Sell Trade Endpoint @done
+- [ ] Create Get All User Transactions Endpoint @done
+
+
+- [ ] Create Admin Panel @done
