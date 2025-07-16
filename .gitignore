@@ -3,3 +3,4 @@ node_modules/
 quote-cache.json
 sandp500.json
 *.log
+done.txt

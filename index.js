@@ -237,6 +237,735 @@ app.get('/api/portfolio', async (req, res) => {
   });
 });
 
+//get portfolio history
+app.get('/api/portfolio-history', async (req, res) => {
+  const { email } = req.query;
+  if (!email) return res.status(400).json({ error: 'Missing email' });
+
+  // Get user ID from email
+  const { data: userData, error: userError } = await supabase
+    .from('users')
+    .select('id')
+    .eq('email', email)
+    .single();
+
+  if (userError || !userData) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+
+  const userId = userData.id;
+
+  // Get portfolio for user ID
+  const { data: portfolio, error: portfolioError } = await supabase
+    .from('portfolios')
+    .select('id')
+    .eq('user_id', userId)
+    .single();
+
+  if (portfolioError || !portfolio) {
+    return res.status(404).json({ error: 'Portfolio not found' });
+  }
+
+  const portfolioId = portfolio.id;
+
+  // Get portfolio history for last 30 days
+  const { data: history, error: historyError } = await supabase
+    .from('portfolio_history')
+    .select('snapshot_date, total_value')
+    .eq('portfolio_id', portfolioId)
+    .gte('snapshot_date', new Date(Date.now() - 30*24*60*60*1000).toISOString().split('T')[0]) // 30 days ago as yyyy-mm-dd
+    .order('snapshot_date', { ascending: true });
+
+  if (historyError) {
+    return res.status(500).json({ error: 'Failed to fetch portfolio history' });
+  }
+
+  res.status(200).json(history || []);
+});
+
+//snapshot portfolio
+app.post('/api/snapshot-portfolios', async (req, res) => {
+  try {
+    // Fetch all portfolios
+    const { data: portfolios, error } = await supabase
+      .from('portfolios')
+      .select('id, cash_balance, total_value');
+
+    if (error) throw error;
+
+    // For each portfolio, insert snapshot
+    const snapshotPromises = portfolios.map(p =>
+      supabase
+        .from('portfolio_history')
+        .insert({
+          portfolio_id: p.id,
+          total_value: p.total_value,
+          cash_balance: p.cash_balance,
+          snapshot_date: new Date().toISOString().split('T')[0]  // YYYY-MM-DD
+      })
+    );
+
+    await Promise.all(snapshotPromises);
+
+    res.status(200).json({ message: 'Snapshots saved for all portfolios' });
+  } catch (err) {
+    console.error('Snapshot error:', err);
+    res.status(500).json({ error: 'Failed to save portfolio snapshots' });
+  }
+});
+
+// FRIENDS + SOCIAL
+
+//send friend request
+app.post('/api/friends/request', async (req, res) => {
+  const { email, targetUsername } = req.body;
+  if (!email || !targetUsername) {
+    return res.status(400).json({ error: 'Missing email or targetUsername' });
+  }
+
+  const { data: user, error: userError } = await supabase
+    .from('users')
+    .select('id')
+    .eq('email', email)
+    .single();
+
+  const { data: targetUser, error: targetUserError } = await supabase
+    .from('users')
+    .select('id')
+    .eq('username', targetUsername)
+    .single();
+
+  if (userError || !user || targetUserError || !targetUser) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+
+  const userId = user.id;
+  const targetUserId = targetUser.id;
+
+  if (userId === targetUserId) {
+    return res.status(400).json({ error: 'You can’t friend yourself' });
+  }
+
+  const { data: existing, error: existingError } = await supabase
+    .from('friends')
+    .select('status')
+    .or(`and(user_id.eq.${userId},friend_id.eq.${targetUserId}),and(user_id.eq.${targetUserId},friend_id.eq.${userId})`)
+    .single();
+
+  if (existing) {
+    return res.status(400).json({ error: 'Friend request already exists or you are already friends' });
+  }
+
+  const { error: requestError } = await supabase
+    .from('friends')
+    .insert({
+      user_id: userId,
+      friend_id: targetUserId,
+      status: 'pending'
+    });
+
+  if (requestError) {
+    return res.status(500).json({ error: 'Failed to send friend request' });
+  }
+
+  res.status(200).json({ message: 'Friend request sent successfully' });
+});
+
+
+//accept reject or block friend request
+app.post('/api/friends/response', async (req, res) => {
+  const { email, targetUsername, action } = req.body;
+  if (!email || !targetUsername || !action) {
+    return res.status(400).json({ error: 'Missing email, targetUsername, or action' });
+  }
+
+  const { data: user, error: userError } = await supabase
+    .from('users')
+    .select('id')
+    .eq('email', email)
+    .single();
+
+  const { data: targetUser, error: targetUserError } = await supabase
+    .from('users')
+    .select('id')
+    .eq('username', targetUsername)
+    .single();
+
+  if (userError || !user || targetUserError || !targetUser) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+
+  const userId = user.id;
+  const targetUserId = targetUser.id;
+
+  const { data: request, error: requestError } = await supabase
+    .from('friends')
+    .select('id')
+    .or(`and(user_id.eq.${userId},friend_id.eq.${targetUserId}),and(user_id.eq.${targetUserId},friend_id.eq.${userId})`)
+    .eq('status', 'pending')
+    .single();
+
+  if (requestError || !request) {
+    return res.status(404).json({ error: 'Pending request not found' });
+  }
+
+  let updatedStatus = null;
+  if (action === 'accept') updatedStatus = 'accepted';
+  else if (action === 'reject') updatedStatus = 'rejected';
+  else if (action === 'block') updatedStatus = 'blocked';
+  else return res.status(400).json({ error: 'Invalid action' });
+
+  const { error: updateError } = await supabase
+    .from('friends')
+    .update({ status: updatedStatus })
+    .eq('id', request.id);
+
+  if (updateError) {
+    return res.status(500).json({ error: 'Failed to update friend request' });
+  }
+
+  res.status(200).json({ message: 'Friend request updated successfully' });
+});
+
+
+//remove friend
+app.post('/api/friends/remove', async (req, res) => {
+  const { email, targetUsername } = req.body;
+  if (!email || !targetUsername) {
+    return res.status(400).json({ error: 'Missing email or targetUsername' });
+  }
+
+  const { data: user, error: userError } = await supabase
+    .from('users')
+    .select('id')
+    .eq('email', email)
+    .single();
+
+  const { data: targetUser, error: targetUserError } = await supabase
+    .from('users')
+    .select('id')
+    .eq('username', targetUsername)
+    .single();
+
+  if (userError || !user || targetUserError || !targetUser) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+
+  const userId = user.id;
+  const targetUserId = targetUser.id;
+
+  const { error: removeError } = await supabase
+    .from('friends')
+    .delete()
+    .or(`and(user_id.eq.${userId},friend_id.eq.${targetUserId}),and(user_id.eq.${targetUserId},friend_id.eq.${userId})`);
+
+  if (removeError) {
+    return res.status(500).json({ error: 'Failed to remove friend' });
+  }
+
+  res.status(200).json({ message: 'Friend removed successfully' });
+});
+
+
+//get friends list
+app.get('/api/friends', async (req, res) => {
+  const { email } = req.query;
+  if (!email) return res.status(400).json({ error: 'Missing email' });
+
+  const { data: user, error: userError } = await supabase
+    .from('users')
+    .select('id')
+    .eq('email', email)
+    .single();
+
+  if (userError || !user) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+
+  const userId = user.id;
+
+  const { data: friendRows, error: friendError } = await supabase
+    .from('friends')
+    .select('user_id, friend_id')
+    .or(`user_id.eq.${userId},friend_id.eq.${userId}`)
+    .eq('status', 'accepted');
+
+  if (friendError) {
+    return res.status(500).json({ error: 'Failed to fetch friends' });
+  }
+
+  const friendIds = friendRows.map(row =>
+    row.user_id === userId ? row.friend_id : row.user_id
+  );
+
+  if (friendIds.length === 0) {
+    return res.status(200).json({ friends: [] });
+  }
+
+  const { data: friendDetails, error: detailError } = await supabase
+    .from('users')
+    .select('id, username, email')
+    .in('id', friendIds);
+
+  if (detailError) {
+    return res.status(500).json({ error: 'Failed to fetch friend details' });
+  }
+
+  res.status(200).json({ friends: friendDetails });
+});
+
+
+//get pending requests
+app.get('/api/friends/pending', async (req, res) => {
+  const { email } = req.query;
+  if (!email) return res.status(400).json({ error: 'Missing email' });
+
+  const { data: user, error: userError } = await supabase
+    .from('users')
+    .select('id')
+    .eq('email', email)
+    .single();
+
+  if (userError || !user) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+
+  const userId = user.id;
+
+  const { data: requests, error: pendingError } = await supabase
+    .from('friends')
+    .select('user_id')
+    .eq('friend_id', userId)
+    .eq('status', 'pending');
+
+  if (pendingError) {
+    return res.status(500).json({ error: 'Failed to fetch pending requests' });
+  }
+
+  const senderIds = requests.map(req => req.user_id);
+
+  if (senderIds.length === 0) return res.status(200).json({ pending: [] });
+
+  const { data: senders, error: senderError } = await supabase
+    .from('users')
+    .select('id, username, email')
+    .in('id', senderIds);
+
+  if (senderError) {
+    return res.status(500).json({ error: 'Failed to fetch sender info' });
+  }
+
+  res.status(200).json({ pending: senders });
+});
+
+
+//get sent requests
+app.get('/api/friends/sent', async (req, res) => {
+  const { email } = req.query;
+  if (!email) return res.status(400).json({ error: 'Missing email' });
+
+  const { data: user, error: userError } = await supabase
+    .from('users')
+    .select('id')
+    .eq('email', email)
+    .single();
+
+  if (userError || !user) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+
+  const userId = user.id;
+
+  const { data: requests, error: sentError } = await supabase
+    .from('friends')
+    .select('friend_id')
+    .eq('user_id', userId)
+    .eq('status', 'pending');
+
+  if (sentError) {
+    return res.status(500).json({ error: 'Failed to fetch sent requests' });
+  }
+
+  const recipientIds = requests.map(req => req.friend_id);
+
+  if (recipientIds.length === 0) return res.status(200).json({ sent: [] });
+
+  const { data: recipients, error: recipientError } = await supabase
+    .from('users')
+    .select('id, username, email')
+    .in('id', recipientIds);
+
+  if (recipientError) {
+    return res.status(500).json({ error: 'Failed to fetch recipient info' });
+  }
+
+  res.status(200).json({ sent: recipients });
+});
+
+
+//get friend status
+app.get('/api/friends/status', async (req, res) => {
+  const { email, targetUsername } = req.query;
+  if (!email || !targetUsername) {
+    return res.status(400).json({ error: 'Missing email or targetUsername' });
+  }
+
+  const { data: user, error: userError } = await supabase
+    .from('users')
+    .select('id')
+    .eq('email', email)
+    .single();
+
+  const { data: target, error: targetError } = await supabase
+    .from('users')
+    .select('id')
+    .eq('username', targetUsername)
+    .single();
+
+  if (userError || !user || targetError || !target) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+
+  const userId = user.id;
+  const targetId = target.id;
+
+  if (userId === targetId) {
+    return res.status(200).json({ status: 'self' });
+  }
+
+  const { data: relationship, error: statusError } = await supabase
+    .from('friends')
+    .select('user_id, friend_id, status')
+    .or(`and(user_id.eq.${userId},friend_id.eq.${targetId}),and(user_id.eq.${targetId},friend_id.eq.${userId})`)
+    .single();
+
+  if (!relationship) {
+    return res.status(200).json({ status: 'none' });
+  }
+
+  let type = relationship.status;
+  if (type === 'pending') {
+    type = relationship.user_id === userId ? 'sent' : 'received';
+  }
+
+  res.status(200).json({ status: type });
+});
+
+// ANNOUNCEMENTS
+
+//get announcements
+app.get('/api/announcements', async (req, res) =>{});
+
+//create announcement
+app.post('/api/admin/announcements', async (req, res) => {});
+
+// pin announcement
+app.put('/api/admin/announcements/:id/pin', async (req, res) => {});
+
+//delete announcement
+app.delete('/api/admin/announcements/:id', async (req, res) => {});
+
+// CHAT - PLACEHOLDER, REPLACE WITH WEBSOCKET IMPLEMENTATION
+
+/*
+//send message
+app.post('/api/chat/send', async (req, res) => {});
+
+//get dm
+app.get('/api/chat/dm:user_id', async (req, res) => {});
+
+//group chat
+app.get('/api/chat/group:group_id', async (req, res) => {});
+
+//public chat
+app.get('/api/chat/public', async (req, res) => {});
+
+// get groups user is in
+app.get('/api/chat/rooms', async (req, res) => {});
+
+//create group
+app.post('/api/chat/group/create', async (req, res) => {});
+
+//add member to group
+app.put('/api/chat/group/:id/add-member', async (req, res) => {});
+
+//remove member
+app.put('/api/chat/group/:id/remove-member', async (req, res) => {});
+
+//delete group chat message
+app.delete('/api/chat/message/:id', async (req, res) => {});
+*/
+
+//GROUPS : V2
+
+/*
+//get all public/user groups
+app.get('/api/groups', async (req, res) => {});
+
+//create group
+app.post('/api/groups/', async (req, res) => {});
+
+//get group info
+app.get('/api/groups/:id', async (req, res) => {});
+
+//update member list
+app.put('/api/groups/:id/members', async (req, res) => {});
+
+//delete group (admin only)
+app.delete('/api/admin/groups/:id', async (req, res) => {});
+
+*/
+
+
+//QOTD
+
+//get todays question + answer
+app.get('/api/qotd', async (req, res) => {
+  try {
+    // get total number of questions
+    const { data: allQuestions, error: allError } = await supabase
+      .from('daily_questions')
+      .select('id')
+      .order('id', { ascending: true });
+
+    if (allError) throw allError;
+    if (!allQuestions || allQuestions.length === 0)
+      return res.status(404).json({ error: 'No questions found' });
+
+    const totalQuestions = allQuestions.length;
+
+    // Use current date to pick question index (like a rotating QOTD)
+    const today = new Date();
+    const dayIndex = today.getDate() % totalQuestions; // rotate daily by date
+
+    // fetch the question at that index
+    const questionId = allQuestions[dayIndex].id;
+
+    const { data: qotd, error: qotdError } = await supabase
+      .from('daily_questions')
+      .select('id, question_text, answer_text, explanation, created_at')
+      .eq('id', questionId)
+      .single();
+
+    if (qotdError) throw qotdError;
+    res.status(200).json(qotd);
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Failed to get QOTD' });
+  }
+});
+
+//question history
+app.get('/api/qotd/history', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('daily_questions')
+      .select('id, question_text, answer_text, explanation, created_at')
+      .order('created_at', { ascending: true });
+
+    if (error) throw error;
+    res.status(200).json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Failed to fetch QOTD history' });
+  }
+});
+
+//create new question (admin only)
+app.post('/api/admin/qotd', async (req, res) => {
+  const { question_text, answer_text, explanation, isAdmin } = req.body;
+
+  if (!isAdmin) return res.status(403).json({ error: 'Unauthorized' });
+  if (!question_text || !answer_text) {
+    return res.status(400).json({ error: 'Question text and answer required' });
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from('daily_questions')
+      .insert([{ question_text, answer_text, explanation }]);
+
+    if (error) throw error;
+    res.status(201).json({ message: 'Question created', question: data[0] });
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Failed to create question' });
+  }
+});
+
+//delete question (admin only)
+app.delete('/api/admin/qotd/:id', async (req, res) => {
+  const { id } = req.params;
+  const { isAdmin } = req.body;
+
+  if (!isAdmin) return res.status(403).json({ error: 'Unauthorized' });
+
+  try {
+    const { data, error } = await supabase
+      .from('daily_questions')
+      .delete()
+      .eq('id', id);
+
+    if (error) throw error;
+    if (!data.length) return res.status(404).json({ error: 'Question not found' });
+
+    res.status(200).json({ message: 'Question deleted' });
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Failed to delete question' });
+  }
+});
+
+
+// ADMIN PANEL
+
+app.put('/api/admin/promote/:user_id', async (req, res) => {
+  const { user_id } = req.params;
+  const { adminPassword } = req.body;
+
+  // Hardcoded admin password (change this to env var in prod)
+  const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+
+  if (!adminPassword || adminPassword !== ADMIN_PASSWORD) {
+    return res.status(403).json({ error: 'Unauthorized: wrong admin password' });
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from('users')
+      .update({ is_admin: true })
+      .eq('id', user_id);
+
+    if (error) throw error;
+    if (!data.length) return res.status(404).json({ error: 'User not found' });
+
+    res.status(200).json({ message: `User ${user_id} promoted to admin` });
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Failed to promote user' });
+  }
+});
+
+
+//get recent activity - MAYBE
+app.get('/api/admin/activity', async (req, res) => {});
+
+//get all users
+app.get('/api/admin/users', async (req, res) => {
+  const { email } = req.query;
+  if (!email) return res.status(400).json({ error: 'Missing email'});
+
+  //Check if user is admin
+  const { data: user, error: userError } = await supabase
+  .from('users')
+  .select('is_admin')
+  .eq('email', email)
+  .single();
+
+  if (userError || !user) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+
+  if (!user.is_admin) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+
+  // Get all users
+  const { data: users, error: usersError } = await supabase
+  .from('users')
+  .select('id, username, email, created_at, is_admin')
+  .order('created_at', { ascending: false });
+
+  if (usersError || !users) {
+    return res.status(500).json({ error: 'Failed to fetch users' });
+  }
+
+  res.status(200).json({ users });
+});
+
+//delete user
+
+app.delete('/api/admin/delete-user', async (req, res) => {
+  const { email, targetEmail, adminPassword } = req.body;
+  if (!email || !targetEmail || !adminPassword) return res.status(400).json({ error: 'Missing email or targetEmail' });
+  // Check if user is admin
+  const { data: user, error: userError } = await supabase
+  .from('users')
+  .select('is_admin')
+  .eq('email', email)
+  .single();
+
+  if (userError || !user) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+
+  if (!user.is_admin) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+
+  if (adminPassword !== process.env.ADMIN_PASSWORD) { 
+    return res.status(403).json({ error: 'Invalid admin password' });
+  }
+
+  // Get target user ID
+  const { data: targetUser, error: targetUserError } = await supabase
+  .from('users')
+  .select('id, username')
+  .eq('email', targetEmail)
+  .single();
+
+  if (targetUserError || !targetUser) {
+    return res.status(404).json({ error: 'Target user not found' });
+  }
+
+  const targetUserId = targetUser.id;
+
+  // Delete holdings, transactions, and portfolio for target user
+  const { data: targetPortfolio, error: portfolioFetchErr } = await supabase
+    .from('portfolios')
+    .select('id')
+    .eq('user_id', targetUserId)
+    .single();
+
+  if (portfolioFetchErr || !targetPortfolio) {
+    return res.status(404).json({ error: 'Portfolio not found' });
+  }
+
+  const portfolioId = targetPortfolio.id;
+
+  await supabase.from('transactions').delete().eq('portfolio_id', portfolioId);
+  await supabase.from('holdings').delete().eq('portfolio_id', portfolioId);
+  await supabase.from('portfolios').delete().eq('id', portfolioId);
+  await supabase.from('users').delete().eq('id', targetUserId);
+
+  res.status(200).json({ message: `User ${targetUser.username} and all data deleted successfully` });
+
+
+});
+
+//extra social
+
+//search user by id
+app.get('/api/users/search', async (req, res) => {
+  const { id } = req.query;
+
+  if (!id) return res.status(400).json({ error: 'Missing user id' });
+
+  try {
+    const { data, error } = await supabase
+      .from('users')
+      .select('id, username, email, is_admin, created_at')
+      .eq('id', id)
+      .single();
+
+    if (error) throw error;
+    if (!data) return res.status(404).json({ error: 'User not found' });
+
+    res.status(200).json({ user: data });
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Failed to search user' });
+  }
+});
+
+
+//report user v2
+//app.post('/api/report', async (req, res) => {});
+
 //get holdings for portfolio
 app.get('/api/holdings', async (req, res) => {
   const { portfolioId } = req.query;
@@ -482,104 +1211,6 @@ app.post('/api/trade', async (req, res) => {
 });
 
 // END TRADING ENDPOINTS
-
-
-// ADMIN PANEL
-
-//get all users
-app.get('/api/admin/users', async (req, res) => {
-  const { email } = req.query;
-  if (!email) return res.status(400).json({ error: 'Missing email'});
-
-  //Check if user is admin
-  const { data: user, error: userError } = await supabase
-  .from('users')
-  .select('is_admin')
-  .eq('email', email)
-  .single();
-
-  if (userError || !user) {
-    return res.status(404).json({ error: 'User not found' });
-  }
-
-  if (!user.is_admin) {
-    return res.status(403).json({ error: 'Access denied' });
-  }
-
-  // Get all users
-  const { data: users, error: usersError } = await supabase
-  .from('users')
-  .select('id, username, email, created_at, is_admin')
-  .order('created_at', { ascending: false });
-
-  if (usersError || !users) {
-    return res.status(500).json({ error: 'Failed to fetch users' });
-  }
-
-  res.status(200).json({ users });
-});
-
-//delete user
-
-app.delete('/api/admin/delete-user', async (req, res) => {
-  const { email, targetEmail, adminPassword } = req.body;
-  if (!email || !targetEmail || !adminPassword) return res.status(400).json({ error: 'Missing email or targetEmail' });
-  // Check if user is admin
-  const { data: user, error: userError } = await supabase
-  .from('users')
-  .select('is_admin')
-  .eq('email', email)
-  .single();
-
-  if (userError || !user) {
-    return res.status(404).json({ error: 'User not found' });
-  }
-
-  if (!user.is_admin) {
-    return res.status(403).json({ error: 'Access denied' });
-  }
-
-  if (adminPassword !== process.env.ADMIN_PASSWORD) { 
-    return res.status(403).json({ error: 'Invalid admin password' });
-  }
-
-  // Get target user ID
-  const { data: targetUser, error: targetUserError } = await supabase
-  .from('users')
-  .select('id, username')
-  .eq('email', targetEmail)
-  .single();
-
-  if (targetUserError || !targetUser) {
-    return res.status(404).json({ error: 'Target user not found' });
-  }
-
-  const targetUserId = targetUser.id;
-
-  // Delete holdings, transactions, and portfolio for target user
-  const { data: targetPortfolio, error: portfolioFetchErr } = await supabase
-    .from('portfolios')
-    .select('id')
-    .eq('user_id', targetUserId)
-    .single();
-
-  if (portfolioFetchErr || !targetPortfolio) {
-    return res.status(404).json({ error: 'Portfolio not found' });
-  }
-
-  const portfolioId = targetPortfolio.id;
-
-  await supabase.from('transactions').delete().eq('portfolio_id', portfolioId);
-  await supabase.from('holdings').delete().eq('portfolio_id', portfolioId);
-  await supabase.from('portfolios').delete().eq('id', portfolioId);
-  await supabase.from('users').delete().eq('id', targetUserId);
-
-  res.status(200).json({ message: `User ${targetUser.username} and all data deleted successfully` });
-
-
-});
-
-// END ADMIN PANEL
 
 // UPDATE
 app.post('/api/update', async (req, res) => {

@@ -21,18 +21,16 @@ if (fs.existsSync(CACHE_PATH)) {
     }
 }
 
-const TTL = 43200000;
+const TTL = 86400000;
 
 const getWithCache = async (key, fetchFn) => {
     const now = Date.now();
     const cached = CACHE.get(key);
     
     if (cached && now - cached.ts < TTL) {
-        console.log(`Cache hit for ${key}`);
         return cached.data;
     }
 
-    console.log(`Cache miss for ${key}, fetching from API`);
     const data = await fetchFn();
     CACHE.set(key, { data, ts: now });
     saveCache();
@@ -49,6 +47,8 @@ async function getQuote(symbol) {
     return {
       symbol: fullQuote.symbol,
       shortName: fullQuote.shortName,
+      exchange: fullQuote.exchange,
+      longName: fullQuote.longName,
       regularMarketPrice: fullQuote.regularMarketPrice,
       regularMarketChange: fullQuote.regularMarketChange,
       regularMarketChangePercent: fullQuote.regularMarketChangePercent,
@@ -56,6 +56,7 @@ async function getQuote(symbol) {
       regularMarketOpen: fullQuote.regularMarketOpen,
       regularMarketDayHigh: fullQuote.regularMarketDayHigh,
       regularMarketDayLow: fullQuote.regularMarketDayLow,
+      marketState: fullQuote.marketState,
       marketCap: fullQuote.marketCap,
       volume: fullQuote.regularMarketVolume,
       currency: fullQuote.currency,
