@@ -210,6 +210,17 @@ app.get('/api/portfolio', async (req, res) => {
     return res.status(500).json({ error: 'Failed to fetch holdings' });
   }
 
+  // Get transactions
+  const { data: transactions, error: transactionsError } = await supabase
+    .from('transactions')
+    .select('id, symbol, shares, price_per_share, transaction_type, transaction_date')
+    .eq('portfolio_id', portfolioId)
+    .order('transaction_date', { ascending: false });
+
+  if (transactionsError) {
+    return res.status(500).json({ error: 'Failed to fetch transactions' });
+  }
+
   // Calculate holdings value
   let holdingsValue = 0;
   if (Array.isArray(holdings)) {
@@ -226,16 +237,19 @@ app.get('/api/portfolio', async (req, res) => {
     .update({ total_value: totalValue })
     .eq('id', portfolioId);
 
-  // Respond with updated portfolio
+  // Respond with updated portfolio, holdings, and transactions
   res.status(200).json({
     portfolio: {
       id: portfolioId,
       cash_balance: portfolio.cash_balance,
       total_value: totalValue,
       created_at: portfolio.created_at
-    }
+    },
+    holdings: holdings || [],
+    transactions: transactions || []
   });
 });
+
 
 //get portfolio history
 app.get('/api/portfolio-history', async (req, res) => {
@@ -654,7 +668,21 @@ app.get('/api/friends/status', async (req, res) => {
 // ANNOUNCEMENTS
 
 //get announcements
-app.get('/api/announcements', async (req, res) =>{});
+app.get('/api/announcement/pinned', async (req, res) =>{
+  const {data, error} = await supabase
+  .from("announcements")
+    .select("id, title, content, created_at, username, is_pinned")
+    .eq("is_pinned", true)
+
+  if (error) {
+    console.error("Failed to fetch pinned announcements:", error);
+    return res.status(500).json({ error: 'Failed to fetch pinned announcements' });
+  }
+
+  res.status(200).json(data);
+});
+
+
 
 //create announcement
 app.post('/api/admin/announcements', async (req, res) => {});
@@ -663,7 +691,24 @@ app.post('/api/admin/announcements', async (req, res) => {});
 app.put('/api/admin/announcements/:id/pin', async (req, res) => {});
 
 //delete announcement
-app.delete('/api/admin/announcements/:id', async (req, res) => {});
+app.delete('/api/admin/announcements/:id', async (req, res) => {
+  const { id } = req.params;
+  if (!id) return res.status(400).json({ error: 'Missing announcement ID' });
+
+
+  //set is pinned false
+  const { error } = await supabase
+    .from('announcements')
+    .update({ is_pinned: false })
+    .eq('id', id);
+
+  if (error) {
+    console.error("Failed to delete announcement:", error);
+    return res.status(500).json({ error: 'Failed to delete announcement' });
+  }
+
+  res.status(200).json({ message: 'Announcement unpinned' });
+});
 
 // CHAT - PLACEHOLDER, REPLACE WITH WEBSOCKET IMPLEMENTATION
 
@@ -722,35 +767,146 @@ app.delete('/api/admin/groups/:id', async (req, res) => {});
 //get todays question + answer
 app.get('/api/qotd', async (req, res) => {
   try {
-    // get total number of questions
-    const { data: allQuestions, error: allError } = await supabase
+    const today = new Date().toISOString().split('T')[0]; // format: YYYY-MM-DD
+
+    const { data: question, error } = await supabase
       .from('daily_questions')
+      .select('id, question_text, answer_text, explanation, choices, created_at')
+      .filter('created_at', 'gte', `${today}T00:00:00`)
+      .filter('created_at', 'lt', `${today}T23:59:59`)
+      .limit(1)
+      .maybeSingle();
+
+    if (error) throw error;
+    if (!question) {
+      return res.status(404).json({ error: 'No question found for today' });
+    }
+
+    res.status(200).json(question);
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'Failed to get QOTD' });
+  }
+});
+
+// Check if user answered today's QOTD
+app.post('/api/qotd/check-answered', async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: 'Missing email' });
+
+  try {
+    // get user id from email
+    const { data: user, error: userError } = await supabase
+      .from('users')
       .select('id')
-      .order('id', { ascending: true });
+      .eq('email', email)
+      .single();
+    if (userError || !user) return res.status(404).json({ error: 'User not found' });
 
-    if (allError) throw allError;
-    if (!allQuestions || allQuestions.length === 0)
-      return res.status(404).json({ error: 'No questions found' });
-
-    const totalQuestions = allQuestions.length;
-
-    // Use current date to pick question index (like a rotating QOTD)
-    const today = new Date();
-    const dayIndex = today.getDate() % totalQuestions; // rotate daily by date
-
-    // fetch the question at that index
-    const questionId = allQuestions[dayIndex].id;
-
-    const { data: qotd, error: qotdError } = await supabase
+    // get today's QOTD id
+    const today = new Date().toISOString().split('T')[0];
+    const { data: question, error: qError } = await supabase
       .from('daily_questions')
-      .select('id, question_text, answer_text, explanation, created_at')
-      .eq('id', questionId)
+      .select('id, created_at')
+      .filter('created_at', 'gte', `${today}T00:00:00`)
+      .filter('created_at', 'lt', `${today}T23:59:59`)
+      .limit(1)
+      .maybeSingle();
+    if (qError) throw qError;
+    if (!question) return res.status(404).json({ error: 'No question for today' });
+
+    // check if user answered
+    const { data: answered, error: ansError } = await supabase
+      .from('user_qotd_answers')
+      .select('*')
+      .eq('user_id', user.id)
+      .eq('question_id', question.id)
       .single();
 
-    if (qotdError) throw qotdError;
-    res.status(200).json(qotd);
+    if (ansError && ansError.code !== 'PGRST116') throw ansError; // PGRST116 = no rows
+
+    res.status(200).json({ answered: !!answered });
   } catch (error) {
-    res.status(500).json({ error: error.message || 'Failed to get QOTD' });
+    res.status(500).json({ error: error.message || 'Failed to check answered status' });
+  }
+});
+
+// Mark user as answered today's QOTD
+app.post('/api/qotd/answer', async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: 'Missing email' });
+
+  try {
+    // get user id from email
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .select('id')
+      .eq('email', email)
+      .single();
+    if (userError || !user) return res.status(404).json({ error: 'User not found' });
+
+    // get today's QOTD id
+    const today = new Date().toISOString().split('T')[0];
+    const { data: question, error: qError } = await supabase
+      .from('daily_questions')
+      .select('id, created_at')
+      .filter('created_at', 'gte', `${today}T00:00:00`)
+      .filter('created_at', 'lt', `${today}T23:59:59`)
+      .limit(1)
+      .maybeSingle();
+    if (qError) throw qError;
+    if (!question) return res.status(404).json({ error: 'No question for today' });
+
+    // insert into user_qotd_answers if not exists (ignore conflict)
+    const { error: insertError } = await supabase
+      .from('user_qotd_answers')
+      .insert([{ user_id: user.id, question_id: question.id }])
+      .select()
+      .single();
+
+    if (insertError && !insertError.message.includes('duplicate key')) {
+      throw insertError;
+    }
+
+    res.status(200).json({ message: 'Marked as answered' });
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Failed to mark answer' });
+  }
+});
+
+//get top 10 users, based on portfolio value
+app.get('/api/top-users', async (req, res) => {
+  try {
+    const { data: portfolios, error: portfolioError } = await supabase
+      .from('portfolios')
+      .select('user_id, total_value')
+      .order('total_value', { ascending: false })
+      .limit(10);
+
+    if (portfolioError) throw portfolioError;
+    if (!portfolios || portfolios.length === 0)
+      return res.status(404).json({ error: 'No users found' });
+
+    const userIds = portfolios.map(p => p.user_id);
+    const { data: users, error: userError } = await supabase
+      .from('users')
+      .select('id, username')
+      .in('id', userIds);
+
+    if (userError) throw userError;
+
+    const topUsers = portfolios.map((p, i) => {
+      const user = users.find(u => u.id === p.user_id);
+      return {
+        rank: i + 1,
+        user_id: p.user_id,
+        username: user ? user.username : 'Unknown',
+        total_value: p.total_value
+      };
+    });
+
+    res.status(200).json(topUsers);
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Failed to fetch top users' });
   }
 });
 
@@ -1260,14 +1416,24 @@ app.get("/api/quote/:symbol", async (req, res) => {
 // get multiple quotes for stocks
 app.get("/api/quotes", async (req, res) => {
   try {
-    const symbols = (req.query.symbols || "").split(",");
-    if (!symbols.length) return res.status(400).json({ error: "No symbols provided" });
+    const symbolsRaw = req.query.symbols;
+    if (!symbolsRaw) {
+      return res.status(400).json({ error: "No symbols provided" });
+    }
+
+    const symbols = symbolsRaw.split(",").map(s => s.trim()).filter(Boolean);
+    if (symbols.length === 0) {
+      return res.status(400).json({ error: "No valid symbols provided" });
+    }
+
     const data = await marketData.getMultipleQuotes(symbols);
     res.json(data);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error("Error fetching multiple quotes:", error);
+    res.status(500).json({ error: "Failed to fetch quotes" });
   }
 });
+
 
 // get historical data for a stock
 app.get("/api/historical/:symbol", async (req, res) => {

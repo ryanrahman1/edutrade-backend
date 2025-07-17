@@ -65,8 +65,55 @@ async function getQuote(symbol) {
 }
 
 async function getMultipleQuotes(symbols = []) {
-    const syms = symbols.map(s => s.toUpperCase());
-    return yahooFinance.quote(syms);
+  const now = Date.now();
+  const upperSymbols = symbols.map(s => s.toUpperCase());
+
+  const results = {};
+  const toFetch = [];
+
+  for (const symbol of upperSymbols) {
+    const cacheKey = `quote:${symbol}`;
+    const cached = CACHE.get(cacheKey);
+    if (cached && now - cached.ts < TTL) {
+      results[symbol] = cached.data;
+    } else {
+      toFetch.push(symbol);
+    }
+  }
+
+  // Fetch data for uncached symbols
+  if (toFetch.length > 0) {
+    const fetchedQuotes = await yahooFinance.quote(toFetch);
+    const quotesArray = Array.isArray(fetchedQuotes) ? fetchedQuotes : [fetchedQuotes];
+
+    for (const quote of quotesArray) {
+      const filtered = {
+        symbol: quote.symbol,
+        shortName: quote.shortName,
+        exchange: quote.exchange,
+        longName: quote.longName,
+        regularMarketPrice: quote.regularMarketPrice,
+        regularMarketChange: quote.regularMarketChange,
+        regularMarketChangePercent: quote.regularMarketChangePercent,
+        regularMarketPreviousClose: quote.regularMarketPreviousClose,
+        regularMarketOpen: quote.regularMarketOpen,
+        regularMarketDayHigh: quote.regularMarketDayHigh,
+        regularMarketDayLow: quote.regularMarketDayLow,
+        marketState: quote.marketState,
+        marketCap: quote.marketCap,
+        volume: quote.regularMarketVolume,
+        currency: quote.currency,
+      };
+
+      const cacheKey = `quote:${quote.symbol}`;
+      CACHE.set(cacheKey, { data: filtered, ts: now });
+      results[quote.symbol] = filtered;
+    }
+
+    saveCache();
+  }
+
+  return results;
 }
 
 async function getHistoricalData(symbol, { interval = "5m", periodDays = 1 } = {}) {
