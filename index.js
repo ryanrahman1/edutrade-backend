@@ -37,14 +37,14 @@ app.post('/api/verify', async (req, res) => {
 
 //get profile info
 app.get('/api/profile', async (req, res) => {
-  const { email } = req.query;
+  const { username } = req.query;
 
-  if (!email) return res.status(400).json({ erorr: 'Missing email'});
+  if (!username) return res.status(400).json({ erorr: 'Missing email'});
 
   const { data, error } = await supabase
   .from('users')
-  .select('id, username, email, created_at, is_admin')
-  .eq('email', email)
+  .select('id, username, email, bio,  created_at, is_admin')
+  .eq('username', username)
   .single();
 
   if (error) {
@@ -101,7 +101,6 @@ app.put('/api/profile/username', async (req, res) => {
     return res.status(400).json({ error: 'Missing Data'});
   }
 
-  /* For Future if username system is used
   const {data: existing, error: checkError } = await supabase
   .from('users')
   .select('id')
@@ -111,11 +110,10 @@ app.put('/api/profile/username', async (req, res) => {
   if (existing) {
     return res.status(409).json({error: 'Username already exists' });
   }
-  */
 
   const { error: updateError } = await supabase
   .from('users')
-  .update('username', newUsername)
+  .update({ username: newUsername })
   .eq('email', email);
 
   if (updateError) {
